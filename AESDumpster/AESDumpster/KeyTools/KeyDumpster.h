@@ -4,13 +4,24 @@
 #include <string>
 #include <algorithm>
 #include <map>
-#include <iostream>
-#include <fstream>
-#include <cassert>
-#include <sys/stat.h>
-#include <Windows.h>
-#include <Psapi.h>
 #include <vector>
+#include <array>
+#include <utility>
+#include <cstdint>
+
+// PBYTE/BYTE/PWORD/WORD are Windows typedefs used throughout the pattern
+// matcher below; define them ourselves off-Windows so that code needs no
+// #ifdefs. The PE-section parser also avoids <Windows.h> entirely (see
+// KeyDumpster.cpp) - it decodes the on-disk PE layout by hand, since it
+// describes the *target* file's format, not anything about the host OS.
+#ifdef _WIN32
+#include <Windows.h>
+#else
+using BYTE = uint8_t;
+using WORD = uint16_t;
+using PBYTE = uint8_t*;
+using PWORD = uint16_t*;
+#endif
 
 class Key
 {
@@ -35,7 +46,7 @@ public:
 
 class KeyDumpster
 {
-#define INRANGE(x,a,b)      (x >= a && x <= b) 
+#define INRANGE(x,a,b)      (x >= a && x <= b)
 #define getBits(x)          (INRANGE(x,'0','9') ? (x - '0') : ((x&(~0x20)) - 'A' + 0xa))
 #define getByte(x)          (getBits(x[0]) << 4 | getBits(x[1]))
 
@@ -63,13 +74,41 @@ public:
 private:
   // Find patter in memory buffer.
   std::vector<PBYTE> Find(const char* pattern, PBYTE rangeStart = NULL, PBYTE rangeEnd = NULL);
+  // Locate the .text/.rdata ranges of a PE image inside the file buffer (raw
+  // file offsets, not RVAs) so scanning can be restricted to plausible code.
+  // Returns an empty vector if the buffer isn't a recognizable x64 PE image.
+  std::vector<std::pair<PBYTE, PBYTE>> GetScannableSections(char* buffer, uint64_t size);
+  // Run every pattern against every given range, filter, dedup and score.
+  // Shared by the section-restricted pass and the full-buffer fallback.
+  bool ScanRanges(char* buffer, const std::vector<std::pair<PBYTE, PBYTE>>& ranges);
+  // Pull the 32 raw key bytes for a match out of the exe buffer.
+  std::array<uint8_t, 32> ExtractKeyBytes(PBYTE keyAddr, int type);
+  // Heuristic false-positive filter: flags candidates whose dwords mostly
+  // look like small IEEE-754 float constants (rounding/lerp tables the
+  // compiler placed next to unrelated code) rather than real key material.
+  bool LooksLikeFloatConstantTable(const std::array<uint8_t, 32>& keyBytes) const;
+
   // AES Binary Pattern Sigs
+  //
+  // TODO(UE5): some UE5 Shipping builds (newer MSVC / AVX2 baseline, PGO
+  // more commonly on) aren't matched by any pattern below. Suspected cause:
+  // the compiler vectorizes the 32-byte stack key init into one or two
+  // movups/vmovdqu loads from a constant blob in .rdata instead of eight
+  // sequential `C7 mov [x], imm32` stores - if so the key bytes live at a
+  // RIP-relative address the instruction merely points to, not inline after
+  // the opcode, so this needs a new extraction strategy alongside a new
+  // pattern, not just another pattern. Needs a disassembly of a failing UE5
+  // exe near the pak encryption key setup to confirm. No repro binary on
+  // hand yet - revisit when one turns up.
   const std::vector<std::string> m_keyPatterns = {
     "C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ?",
     "C7 ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ?",
     "C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? 48 ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ?",
     "C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? ? C7 ? ? ? ? ? C3",
   };
+  // Exact known-bad matches, kept as a fast-path check alongside the
+  // heuristic above. Frozen going forward - new false positives should be
+  // caught by the heuristic instead of growing this list by hand.
   const std::vector<std::string> m_falsePositives = {
     "FFD9FFD9FFD9FFD9FFD9FFD9FFD9FFD9FFD9FFD9FFD9FFD9FFD9FFD9FFD9FFD9",
     "67E6096A85AE67BB72F36E3C3AF54FA57F520E518C68059BABD9831F19CDE05B",
@@ -108,6 +147,5 @@ public:
   Keys m_keys{};
   std::vector<double> m_keyEntropies{};
   std::vector<size_t> m_MostLikelyKey{};
-  
-};
 
+};
