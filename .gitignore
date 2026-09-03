@@ -1,0 +1,26 @@
+# Visual Studio
+.vs/
+*.user
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Bb]in/
+[Oo]bj/
+*.ilk
+*.pdb
+*.obj
+*.exp
+*.lib
+*.exe
+*.log
+*.tlog
+
+# JetBrains Rider / other IDEs
+.idea/
+
+# CMake
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
